@@ -1,0 +1,62 @@
+# Karakeep Tester-Env Compose Overlay
+# Source-build dev deployment: Next.js dev mode with source mounted for live mutation.
+
+services:
+  web:
+    image: karakeep-web-dev:latest
+    restart: unless-stopped
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - pnpm-store:/pnpm
+      - data:/data
+      - next_cache:/app/apps/web/.next
+    ports:
+      - "3010:3000"
+    environment:
+      MEILI_ADDR: http://meilisearch:7700
+      NEXTAUTH_URL: http://localhost:3010
+      NEXTAUTH_SECRET: tester-env-karakeep-super-secure-nextauth-secret
+      DATA_DIR: /data
+      DISABLE_NEW_RELEASE_CHECK: "true"
+      HOSTNAME: 0.0.0.0
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    command:
+      - pnpm
+      - web
+    working_dir: /app
+    depends_on:
+      meilisearch:
+        condition: service_started
+
+  prep:
+    image: karakeep-web-dev:latest
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - pnpm-store:/pnpm
+      - data:/data
+    environment:
+      DATA_DIR: /data
+      DISABLE_NEW_RELEASE_CHECK: "true"
+    command:
+      - sh
+      - -c
+      - "pnpm install --frozen-lockfile && pnpm run db:migrate"
+    working_dir: /app
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.41.0
+    restart: unless-stopped
+    environment:
+      MEILI_NO_ANALYTICS: "true"
+    volumes:
+      - meilisearch:/meili_data
+
+volumes:
+  meilisearch:
+  data:
+  node_modules:
+  pnpm-store:
+  next_cache:

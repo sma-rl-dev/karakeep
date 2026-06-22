@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Karakeep — Tester Environment CLI
+# Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+# Commands: deploy, seed, verify, reset, stop, logs, status, help
+
+RUN_ID="default"
+PORT="3010"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tester-env.yml"
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@karakeep.local}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin12345}"
+
+refresh_names() {
+    local suffix=""
+    if [[ "${RUN_ID}" != "default" ]]; then
+        suffix="-${RUN_ID}"
+    fi
+    COMPOSE_PROJECT="karakeep${suffix}"
+}
+
+compose() { docker compose -f "$COMPOSE_FILE" --project-name "$COMPOSE_PROJECT" "$@"; }
+
+wait_health() {
+    for _ in $(seq 1 60); do
+        curl -sf "http://localhost:${PORT}/api/health" >/dev/null 2>&1 && return 0
+        sleep 2
+    done
+    echo "Karakeep not healthy after 120s" >&2
+    return 1
+}
+
+cmd_deploy() {
+    echo "==> Building base image (docker/Dockerfile.dev)..."
+    docker build -f "${SCRIPT_DIR}/docker/Dockerfile.dev" -t karakeep-web-dev:latest "${SCRIPT_DIR}"
+
+    echo "==> Starting meilisearch and running prep..."
+    compose up -d meilisearch
+    compose run --rm prep
+
+    echo "==> Starting web service..."
+    compose up -d web
+
+    wait_health
+
+    echo "==> Creating admin user (idempotent)..."
+    curl -sf -X POST "http://localhost:${PORT}/api/trpc/users.create" \
+        -H 'Content-Type: application/json' \
+        -d "{\"json\":{\"name\":\"Admin\",\"email\":\"${ADMIN_EMAIL}\",\"password\":\"${ADMIN_PASSWORD}\",\"confirmPassword\":\"${ADMIN_PASSWORD}\"}}" \
+        >/dev/null 2>&1 || true
+
+    echo "==> Karakeep ready at http://localhost:${PORT}"
+    echo "==> Credentials: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}"
+}
+
+cmd_seed() {
+    wait_health
+    echo "==> Seeding deterministic data..."
+    compose exec -T web node <<'NODE'
+const Database = require('better-sqlite3');
+const db = new Database('/data/db.db'); db.pragma('foreign_keys = ON');
+const user = db.prepare("select id from user where email=?").get('admin@karakeep.local');
+if (!user) throw new Error('run deploy first');
+const ts = s => Math.floor(Date.parse(s)/1000);
+const b = [
+ ['seed-bm-001','Kubernetes Runbook: Blue/Green Deployments','https://docs.local/ops/kubernetes-blue-green','Step-by-step rollout checklist for checkout and billing services.','Roll back if checkout latency exceeds the agreed threshold.',0,1,'2026-01-15T09:00:00Z'],
+ ['seed-bm-002','Q2 Product Analytics Plan','https://example.com/product/q2-analytics-plan','Dashboard metrics and launch instrumentation plan for the growth team.','North-star metric review includes the search phrase "aurora retention cohort".',0,0,'2026-02-03T14:30:00Z'],
+ ['seed-bm-003','Design Systems: Accessible Forms','https://example.com/design/accessibility-forms','Reference checklist for labels, validation, keyboard order, and error messages.','Review before the settings redesign.',0,0,'2026-02-18T11:45:00Z'],
+ ['seed-bm-004','Incident Review: Payment Timeout','https://status.local/incidents/payment-timeout-review','Post-incident notes for the January payment processor timeout.','Archived after remediation actions were completed.',1,0,'2026-01-28T16:15:00Z'],
+ ['seed-bm-005','Vendor Security Questionnaire','https://security.local/vendor-questionnaire','Security review template for SOC2, data retention, and subprocessors.','Favourite reference for procurement reviews.',0,1,'2026-03-01T08:20:00Z'],
+ ['seed-bm-006','Local Text Note: Customer Interview Themes',null,null,'Interview synthesis for Nimbus Labs: onboarding clarity, saved-search education, and alert fatigue.',0,0,'2026-03-05T10:00:00Z']
+];
+const tags=[['seed-tag-ops','Ops'],['seed-tag-product','Product'],['seed-tag-design','Design'],['seed-tag-security','Security'],['seed-tag-research','Research']];
+const lists=[['seed-list-launch','Launch Readiness','Release planning, rollout, and measurement references.','🚀'],['seed-list-incidents','Incident Reviews','Archived and active reliability follow-ups.','🧯'],['seed-list-research','Research Library','Customer and UX research bookmarks.','🔎']];
+const tagMap={'seed-bm-001':['seed-tag-ops'],'seed-bm-002':['seed-tag-product'],'seed-bm-003':['seed-tag-design'],'seed-bm-004':['seed-tag-ops'],'seed-bm-005':['seed-tag-security'],'seed-bm-006':['seed-tag-research','seed-tag-product']};
+const listMap={'seed-list-launch':['seed-bm-001','seed-bm-002','seed-bm-005'],'seed-list-incidents':['seed-bm-004'],'seed-list-research':['seed-bm-003','seed-bm-006']};
+db.transaction(()=>{
+ db.prepare('delete from bookmarks where userId=?').run(user.id);
+ db.prepare('delete from bookmarkTags where userId=?').run(user.id);
+ db.prepare('delete from bookmarkLists where userId=?').run(user.id);
+ const ib=db.prepare("insert into bookmarks (id,createdAt,modifiedAt,title,archived,favourited,userId,taggingStatus,summarizationStatus,summary,note,type,source) values (?,?,?,?,?,?,?,'success','success',?,?,?,'api')");
+ const il=db.prepare("insert into bookmarkLinks (id,url,title,description,crawledAt,crawlStatus,crawlStatusCode) values (?,?,?,?,?,'success',200)");
+ const it=db.prepare('insert into bookmarkTexts (id,text,sourceUrl) values (?,?,null)');
+ for (const [id,title,url,desc,note,arch,fav,created] of b){
+   ib.run(id,ts(created),ts(created),title,arch,fav,user.id,desc??null,note,url?'link':'text');
+   url ? il.run(id,url,title,desc,ts(created)) : it.run(id,note);
+ }
+ const tg=db.prepare('insert into bookmarkTags (id,name,createdAt,userId) values (?,?,?,?)');
+ for (const [id,name] of tags) tg.run(id,name,ts('2026-01-01T00:00:00Z'),user.id);
+ const tb=db.prepare("insert into tagsOnBookmarks (bookmarkId,tagId,attachedAt,attachedBy) values (?,?,?,'human')");
+ for (const [bid,tids] of Object.entries(tagMap)) for (const tid of tids) tb.run(bid,tid,ts('2026-03-06T12:00:00Z'));
+ const li=db.prepare("insert into bookmarkLists (id,name,description,icon,createdAt,userId,type,public) values (?,?,?,?,?,?,'manual',0)");
+ for (const [id,name,desc,icon] of lists) li.run(id,name,desc,icon,ts('2026-03-06T12:00:00Z'),user.id);
+ const lb=db.prepare('insert into bookmarksInLists (bookmarkId,listId,addedAt,listMembershipId) values (?,?,?,null)');
+ for (const [lid,bids] of Object.entries(listMap)) for (const bid of bids) lb.run(bid,lid,ts('2026-03-06T12:00:00Z'));
+})();
+console.log('seeded admin=admin@karakeep.local bookmarks=6 active=5 archived=1 favourites=2 tags=5 lists=3 list_memberships=6');
+NODE
+    echo "==> Seed complete."
+}
+
+cmd_verify() {
+    wait_health
+    echo "==> Verifying seeded state..."
+    compose exec -T web node <<'NODE'
+const Database = require('better-sqlite3');
+const db = new Database('/data/db.db');
+const user = db.prepare("select id from user where email=? and role='admin'").get('admin@karakeep.local');
+if (!user) throw new Error('missing admin');
+const one = sql => db.prepare(sql).get(user.id).n;
+const checks = [
+ ['bookmarks', one('select count(*) n from bookmarks where userId=?'), 6],
+ ['active', one('select count(*) n from bookmarks where userId=? and archived=0'), 5],
+ ['archived', one('select count(*) n from bookmarks where userId=? and archived=1'), 1],
+ ['favourites', one('select count(*) n from bookmarks where userId=? and favourited=1'), 2],
+ ['tags', one('select count(*) n from bookmarkTags where userId=?'), 5],
+ ['lists', one('select count(*) n from bookmarkLists where userId=?'), 3],
+ ['list_memberships', db.prepare('select count(*) n from bookmarksInLists').get().n, 6]
+];
+for (const [name, got, exp] of checks) {
+ if (got !== exp) throw new Error(`${name}: expected ${exp}, got ${got}`);
+}
+if (db.prepare("select title from bookmarks where id='seed-bm-002'").get()?.title !== 'Q2 Product Analytics Plan') {
+ throw new Error('missing Q2 Product Analytics Plan');
+}
+if (!(db.prepare("select text from bookmarkTexts where id='seed-bm-006'").get()?.text ?? '').includes('Nimbus Labs')) {
+ throw new Error('missing Nimbus Labs text note');
+}
+console.log('verified admin=admin@karakeep.local bookmarks=6 active=5 archived=1 favourites=2 tags=5 lists=3 list_memberships=6');
+NODE
+    echo "==> Verification passed."
+}
+
+cmd_reset() {
+    echo "==> Stopping and removing containers/volumes..."
+    compose down -v 2>/dev/null || true
+    echo "==> Reset complete."
+}
+
+cmd_stop() {
+    compose stop 2>/dev/null || true
+    echo "==> Stopped."
+}
+
+cmd_logs() {
+    compose logs -f
+}
+
+cmd_status() {
+    compose ps
+}
+
+cmd_help() {
+    cat <<EOF
+Karakeep — Tester Environment CLI
+
+Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+
+Commands:
+  deploy    Build image, start services, create admin user
+  seed      Populate with deterministic seed data
+  verify    Assert seeded state is intact
+  reset     Stop and remove containers + volumes
+  stop      Stop containers (preserves data)
+  logs      Tail container logs
+  status    Show container status
+  help      Show this help
+
+Options:
+  --run-id <id>     Isolate compose project for parallel runs (default: default)
+  --port <port>     Host port (default: 3010)
+
+Credentials: admin@karakeep.local / admin12345
+URL: http://localhost:3010
+EOF
+}
+
+main() {
+    local cmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --run-id) RUN_ID="$2"; shift 2;;
+            --port) PORT="$2"; shift 2;;
+            *) echo "Unknown option: $1" >&2; exit 1;;
+        esac
+    done
+
+    refresh_names
+
+    case "$cmd" in
+        deploy)     cmd_deploy;;
+        seed)       cmd_seed;;
+        verify)     cmd_verify;;
+        reset)      cmd_reset;;
+        stop)       cmd_stop;;
+        logs)       cmd_logs;;
+        status)     cmd_status;;
+        help|--help|-h) cmd_help;;
+        *)          echo "Unknown command: $cmd" >&2; cmd_help; exit 1;;
+    esac
+}
+
+main "$@"
