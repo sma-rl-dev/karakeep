@@ -12,10 +12,10 @@ services:
       - data:/data
       - next_cache:/app/apps/web/.next
     ports:
-      - "3010:3000"
+      - "${PORT:-3010}:3000"
     environment:
       MEILI_ADDR: http://meilisearch:7700
-      NEXTAUTH_URL: http://localhost:3010
+      NEXTAUTH_URL: http://localhost:${PORT:-3010}
       NEXTAUTH_SECRET: tester-env-karakeep-super-secure-nextauth-secret
       DATA_DIR: /data
       DISABLE_NEW_RELEASE_CHECK: "true"

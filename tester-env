@@ -9,6 +9,7 @@ RUN_ID="default"
 PORT="3010"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tester-env.yml"
+export PORT
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@karakeep.local}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin12345}"
 
