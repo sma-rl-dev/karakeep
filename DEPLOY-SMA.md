@@ -27,10 +27,22 @@ After `./tester-env seed`:
 
 | Entity | Count |
 |--------|-------|
-| Bookmarks | 6 (5 active, 1 archived) |
+| Bookmarks | 16 (15 active, 1 archived) |
 | Favourites | 2 |
-| Tags | 5 (Ops, Product, Design, Security, Research) |
+| Tags | 53, all human-attached (Your Tags badge shows 50+ with Load More on the Tags page) |
 | Lists | 3 (Launch Readiness, Incident Reviews, Research Library) |
+
+The tag set is a power-user taxonomy spread across the workspace: topic tags
+(Kubernetes, Postgres, GraphQL, TypeScript, Web Performance, Accessibility,
+Observability, Privacy, Licensing, Developer Experience), project tags
+(Checkout Relaunch, Billing Migration, Mobile Beta, Pricing Experiment,
+Design Tokens, Analytics Revamp), workflow tags (To Read, Reading Now,
+Needs Review, Follow-up, Deep Dive, Quick Reference), format tags
+(Documentation, Blog Post, Conference Talk, Video, Podcast, RFC, Case Study,
+Changelog), vendor tags (AWS, Stripe, Datadog, Figma, Linear, Vercel),
+year/quarter tags (2024, 2025, 2026, Q1-Q4), and audience tags (Engineering,
+Product Team, Support, Sales, Leadership). Every tag is attached to at least
+one bookmark by a human, so the Your Tags section paginates at 50 per page.
 
 ## Reset Path
 
@@ -40,7 +52,9 @@ After `./tester-env seed`:
 
 ## Dev Notes
 
-- The base image is built from `docker/Dockerfile.dev` (node:24-alpine + pnpm).
+- The base image is built from `docker/Dockerfile.tester-env` (fork-owned copy of `docker/Dockerfile.dev` with the node base pinned to `node:24.19-alpine`; the moving `node:24-alpine` tag landed on v24.20.0 on 2026-09-02 and node processes abort/segfault nondeterministically in better-sqlite3 and Next.js workloads under it).
+- DB migrations run via `tester-env-migrate.cjs` (fork-owned, idempotent, drizzle-compatible `__drizzle_migrations` rows) with a retry loop in the `prep` compose service; `pnpm run db:migrate` (tsx) is bypassed for the same flakiness reason.
+- `tester-env-seed.cjs` and `tester-env-verify.cjs` hold the seed/verify logic; the CLI retries them only on native crash exit codes (134/139). Both are idempotent.
 - Source is bind-mounted via `docker-compose.tester-env.yml` so Next.js HMR reflects code changes live.
 - First deploy cold time: ~2m16s pnpm install + ~10s db:migrate + ~7s Next.js compile.
 - Subsequent deploys reuse Docker volumes for node_modules and pnpm-store (seconds to restart).

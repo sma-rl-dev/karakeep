@@ -43,7 +43,7 @@ services:
     command:
       - sh
       - -c
-      - "pnpm install --frozen-lockfile && pnpm run db:migrate"
+      - "pnpm install --frozen-lockfile && (n=0; until node /app/tester-env-migrate.cjs; do n=$$(($$n+1)); if [ $$n -ge 8 ]; then echo 'migrate failed after 8 attempts' && exit 1; fi; echo \"migrate attempt $$n failed; retrying\"; sleep 2; done)"
     working_dir: /app
 
   meilisearch:
