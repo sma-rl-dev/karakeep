@@ -10,6 +10,10 @@ PORT="3010"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tester-env.yml"
 export PORT
+# Content-addressed image tag supplied by scripts/rl-env; standalone runs keep
+# the shared dev name. Exported so docker-compose.tester-env.yml interpolates it.
+IMAGE_TAG="${IMAGE_TAG:-karakeep-web-dev:latest}"
+export IMAGE_TAG
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@karakeep.local}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin12345}"
 
@@ -64,8 +68,8 @@ retry_on_crash() {
 }
 
 cmd_deploy() {
-    echo "==> Building base image (docker/Dockerfile.tester-env, pinned node base)..."
-    docker build -f "${SCRIPT_DIR}/docker/Dockerfile.tester-env" -t karakeep-web-dev:latest "${SCRIPT_DIR}"
+    echo "==> Building base image (docker/Dockerfile.tester-env, pinned node base, tag ${IMAGE_TAG})..."
+    docker build -f "${SCRIPT_DIR}/docker/Dockerfile.tester-env" -t "$IMAGE_TAG" "${SCRIPT_DIR}"
 
     echo "==> Starting meilisearch and running prep..."
     compose up -d meilisearch
@@ -100,7 +104,33 @@ cmd_verify() {
     echo "==> Verification passed."
 }
 
+# Restore host ownership of files written into the bind-mounted worktree by the
+# root container user (nested pnpm workspace node_modules and .next mount
+# stubs), so the host-side worktree removal in `scripts/rl-env stop` and later
+# git operations succeed. Runs before `compose down` while the image exists.
+# Returns non-zero if root-owned files exist but cannot be restored.
+restore_worktree_ownership() {
+    local root_owned
+    root_owned="$(find "$SCRIPT_DIR" -xdev -user 0 -print -quit 2>/dev/null || true)"
+    if [ -z "$root_owned" ]; then
+        return 0
+    fi
+    if ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+        echo "==> Cannot restore worktree ownership: root-owned files exist under ${SCRIPT_DIR} but image ${IMAGE_TAG} is missing" >&2
+        return 1
+    fi
+    local owner
+    owner="$(stat -c '%u:%g' "$SCRIPT_DIR")"
+    echo "==> Restoring worktree ownership to ${owner} before stop..."
+    # Stop writers first so no new root-owned files appear after the chown.
+    compose stop 2>/dev/null || true
+    docker run --rm --network none --user 0 \
+        --mount "type=bind,src=${SCRIPT_DIR},dst=/app" \
+        --entrypoint chown "$IMAGE_TAG" -R "$owner" /app
+}
+
 cmd_reset() {
+    restore_worktree_ownership || return $?
     echo "==> Stopping and removing containers/volumes..."
     compose down -v 2>/dev/null || true
     echo "==> Reset complete."

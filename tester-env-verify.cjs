@@ -42,7 +42,81 @@ if (db.prepare("select title from bookmarks where id='seed-bm-007'").get()?.titl
 if ((db.prepare("select count(*) n from tagsOnBookmarks where attachedBy<>'human'").get().n) !== 0) {
   throw new Error("seed tags must all be human-attached");
 }
-console.log(
-  "verified admin=admin@karakeep.local bookmarks=16 active=15 archived=1 " +
-    "favourites=2 tags=53 human_attached_tags=53 lists=3 list_memberships=6",
-);
+const dbTagNames = db
+  .prepare("select name from bookmarkTags where userId=?")
+  .all(user.id)
+  .map((r) => r.name)
+  .sort();
+db.close();
+
+const MEILI_ADDR = (process.env.MEILI_ADDR || "").replace(/\/+$/, "");
+if (!MEILI_ADDR) {
+  throw new Error("MEILI_ADDR is required to verify the search index");
+}
+
+async function meili(path, init) {
+  const res = await fetch(`${MEILI_ADDR}${path}`, {
+    ...init,
+    headers: { "content-type": "application/json", ...((init && init.headers) || {}) },
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const code = (body && body.code) || res.status;
+    const msg = (body && body.message) || res.statusText;
+    throw new Error(`meili ${(init && init.method) || "GET"} ${path} -> ${res.status} ${code}: ${msg}`);
+  }
+  return body;
+}
+
+const sameSet = (a, b) => JSON.stringify([...(a || [])].sort()) === JSON.stringify([...b].sort());
+const expect = (ok, msg) => {
+  if (!ok) throw new Error(msg);
+};
+
+(async () => {
+  const stats = await meili("/indexes/bookmarks/stats");
+  expect(stats.numberOfDocuments === 16, `index documents: expected 16, got ${stats.numberOfDocuments}`);
+
+  const settings = await meili("/indexes/bookmarks/settings");
+  expect(sameSet(settings.filterableAttributes, ["id", "userId"]), `filterableAttributes: ${JSON.stringify(settings.filterableAttributes)}`);
+  expect(sameSet(settings.sortableAttributes, ["createdAt"]), `sortableAttributes: ${JSON.stringify(settings.sortableAttributes)}`);
+  // The app never sets searchableAttributes; Meili default ["*"] must remain.
+  expect((settings.searchableAttributes || ["*"]).includes("*"), `searchableAttributes restricted: ${JSON.stringify(settings.searchableAttributes)}`);
+
+  const listed = await meili("/indexes/bookmarks/documents?limit=20&fields=id,userId,title,tags,note,content,url");
+  const docs = listed.results || [];
+  expect(docs.length === 16, `index documents listed: expected 16, got ${docs.length}`);
+  for (const doc of docs) {
+    expect(String(doc.id).startsWith("seed-bm-"), `unexpected index doc id ${doc.id}`);
+    expect(doc.userId === user.id, `index doc ${doc.id} not owned by the seed admin`);
+  }
+  const derivedTags = [...new Set(docs.flatMap((doc) => doc.tags || []))].sort();
+  expect(JSON.stringify(derivedTags) === JSON.stringify(dbTagNames), `index tags != DB tags (index ${derivedTags.length}, db ${dbTagNames.length})`);
+  const bm002 = docs.find((doc) => doc.id === "seed-bm-002");
+  expect(bm002 && bm002.title === "Q2 Product Analytics Plan" && (bm002.tags || []).includes("Product"), "index doc seed-bm-002 is not the Q2 Product Analytics Plan with the Product tag");
+  const bm006 = docs.find((doc) => doc.id === "seed-bm-006");
+  expect(`${(bm006 && bm006.content) || ""} ${(bm006 && bm006.note) || ""}`.includes("Nimbus Labs"), "index doc seed-bm-006 is missing the text-note fulltext (Nimbus Labs)");
+
+  // Mutation-agnostic: single term only; no explicit matching strategy and no
+  // multi-term all-terms expectation, so the intended FAIL environment is not
+  // rejected before the UI exercises it.
+  const search = await meili("/indexes/bookmarks/search", {
+    method: "POST",
+    body: JSON.stringify({ q: "Product", filter: `userId = "${user.id}"`, limit: 20, attributesToRetrieve: ["id"] }),
+  });
+  const hitIds = (search.hits || []).map((hit) => hit.id);
+  expect(hitIds.includes("seed-bm-002"), `representative 'Product' search missing seed-bm-002 (hits=${JSON.stringify(hitIds)})`);
+
+  const tasks = await meili("/tasks?indexUids=bookmarks&limit=50");
+  const failed = (tasks.results || []).filter((task) => task.status === "failed");
+  expect(!failed.length, `failed Meili tasks: ${JSON.stringify(failed.map((t) => ({ uid: t.uid, type: t.type, error: t.error })))}`);
+
+  console.log(
+    "verified admin=admin@karakeep.local bookmarks=16 active=15 archived=1 favourites=2 " +
+      "tags=53 human_attached_tags=53 lists=3 list_memberships=6",
+  );
+  console.log(`verified search_index=bookmarks documents=16 product_hits=${hitIds.length}`);
+})().catch((err) => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(1);
+});

@@ -102,7 +102,96 @@ db.transaction(() => {
     for (const bid of bids) lb.run(bid, lid, ts("2026-03-06T12:00:00Z"));
 })();
 
-console.log(
-  "seeded admin=admin@karakeep.local bookmarks=16 active=15 archived=1 " +
-    "favourites=2 tags=53 human_attached_tags=53 lists=3 list_memberships=6",
-);
+db.close();
+
+const MEILI_ADDR = (process.env.MEILI_ADDR || "").replace(/\/+$/, "");
+if (!MEILI_ADDR) {
+  throw new Error("MEILI_ADDR is required to seed the search index");
+}
+
+// Official document set; mirrors searchWorker.ts runIndex() and
+// zBookmarkSearchDocument: link -> url/linkTitle/description/content(null,
+// seed has no htmlContent)/publisher/author/dates; text -> content=bookmarkTexts.text.
+// Attribute order matches runIndex(): id, userId, [link fields | content], note,
+// summary, title, createdAt, tags. No volatile/computed field is added.
+const tagNameById = new Map(tags);
+const documents = b.map(([id, title, url, desc, note, , , created]) => {
+  const link = url
+    ? { url, linkTitle: title, description: desc ?? null, content: null, publisher: null, author: null, datePublished: null, dateModified: null }
+    : { content: note };
+  return {
+    id,
+    userId: user.id,
+    ...link,
+    note,
+    summary: desc ?? null,
+    title,
+    createdAt: new Date(ts(created) * 1000).toISOString(),
+    tags: (tagMap[id] ?? []).map((t) => tagNameById.get(t)).sort(),
+  };
+});
+
+async function meili(path, init) {
+  const res = await fetch(`${MEILI_ADDR}${path}`, {
+    ...init,
+    headers: { "content-type": "application/json", ...((init && init.headers) || {}) },
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const code = (body && body.code) || res.status;
+    const msg = (body && body.message) || res.statusText;
+    throw new Error(`meili ${(init && init.method) || "GET"} ${path} -> ${res.status} ${code}: ${msg}`);
+  }
+  return body;
+}
+
+// Mirrors MeiliSearchIndexClient.ensureTaskSuccess: 200ms poll, 90% of
+// SEARCH_JOB_TIMEOUT_SEC(30)=27000ms. A failed or unsettled task throws once;
+// no retry is attempted.
+async function waitTask(uid) {
+  const deadline = Date.now() + 27000;
+  for (;;) {
+    const task = await meili(`/tasks/${uid}`);
+    if (task.status === "succeeded") return task;
+    if (task.status === "failed" || task.status === "canceled") {
+      const err = task.error || {};
+      throw new Error(`meili task ${uid} (${task.type}) ${task.status}: ${err.code || ""} ${err.message || ""}`.trim());
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`meili task ${uid} (${task.type}) unsettled after 27000ms (last ${task.status})`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
+const sameSet = (a, b) => JSON.stringify([...(a || [])].sort()) === JSON.stringify([...b].sort());
+async function put(path, value) {
+  const task = await meili(path, { method: "PUT", body: JSON.stringify(value) });
+  await waitTask(task.taskUid);
+}
+
+async function syncSearchIndex() {
+  const indexes = await meili("/indexes?limit=100");
+  if (!(indexes.results || []).some((i) => i.uid === "bookmarks")) {
+    const created = await meili("/indexes", { method: "POST", body: JSON.stringify({ uid: "bookmarks", primaryKey: "id" }) });
+    await waitTask(created.taskUid);
+  }
+  const settings = await meili("/indexes/bookmarks/settings");
+  if (!sameSet(settings.filterableAttributes, ["id", "userId"])) await put("/indexes/bookmarks/settings/filterable-attributes", ["id", "userId"]);
+  if (!sameSet(settings.sortableAttributes, ["createdAt"])) await put("/indexes/bookmarks/settings/sortable-attributes", ["createdAt"]);
+  // Fixed document IDs make repeated upserts idempotent.
+  const added = await meili("/indexes/bookmarks/documents?primaryKey=id", { method: "POST", body: JSON.stringify(documents) });
+  await waitTask(added.taskUid);
+}
+
+(async () => {
+  await syncSearchIndex();
+  console.log(
+    "seeded admin=admin@karakeep.local bookmarks=16 active=15 archived=1 " +
+      "favourites=2 tags=53 human_attached_tags=53 lists=3 list_memberships=6",
+  );
+  console.log("seeded search_index=bookmarks documents=16 filterable=id,userId sortable=createdAt");
+})().catch((err) => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(1);
+});
