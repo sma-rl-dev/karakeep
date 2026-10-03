@@ -49,6 +49,30 @@ const dbTagNames = db
   .sort();
 db.close();
 
+// --- Queue prerequisite: schema + official indexes (pre-UI) ----------------
+// Workers are omitted, so seed writes db.db directly and enqueues nothing;
+// legitimate UI edits may add pending tasks. Assert schema/index presence
+// only, and log the current task count as a diagnostic (not an oracle).
+const QUEUE_DB_PATH = "/data/queue.db";
+const qdb = new Database(QUEUE_DB_PATH);
+if (!qdb.prepare("select name from sqlite_master where type='table' and name='tasks'").get()) {
+  throw new Error(`queue prerequisite: missing tasks table at ${QUEUE_DB_PATH}`);
+}
+const QUEUE_INDEXES = [
+  "tasks_queue_idx", "tasks_status_idx", "tasks_expire_at_idx",
+  "tasks_num_runs_left_idx", "tasks_max_num_runs_idx", "tasks_allocation_id_idx",
+  "tasks_queue_idempotencyKey_unique", "tasks_priority_idx", "tasks_available_at_idx",
+];
+const qIndexes = new Set(
+  qdb.prepare("select name from sqlite_master where type='index' and tbl_name='tasks'").all().map((r) => r.name),
+);
+for (const idx of QUEUE_INDEXES) {
+  if (!qIndexes.has(idx)) throw new Error(`queue prerequisite: missing official index ${idx}`);
+}
+const qCount = qdb.prepare("select count(*) n from tasks").get().n;
+qdb.close();
+console.log(`verified queue_schema=tasks official_indexes=${QUEUE_INDEXES.length} tasks=${qCount}`);
+
 const MEILI_ADDR = (process.env.MEILI_ADDR || "").replace(/\/+$/, "");
 if (!MEILI_ADDR) {
   throw new Error("MEILI_ADDR is required to verify the search index");

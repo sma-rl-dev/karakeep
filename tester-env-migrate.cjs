@@ -78,3 +78,29 @@ console.log(
   `migrations verified: ${entries.length} journal entries, ` +
     `${newlyApplied} newly applied`,
 );
+
+// --- Queue prerequisite: create the liteque SQLite schema (tasks table) ----
+// tester-env composes no workers service, so the upstream
+// prepareQueue() -> LitequeQueueClient.prepare() -> migrateDB() call
+// (apps/workers/index.ts) never runs. The web process opens DATA_DIR/queue.db
+// without schema, so any bookmark update fails with "no such table: tasks".
+// Run the official public liteque migrator here, before web starts. This
+// constructs no Runner, poller, crawler, or LLM consumer.
+const QUEUE_DB_PATH = path.join(process.env.DATA_DIR || "/data", "queue.db");
+const liteque = require(
+  require.resolve("liteque", {
+    paths: [path.join(__dirname, "packages/plugins/queue-liteque")],
+  }),
+);
+const queueDb = liteque.buildDBClient(QUEUE_DB_PATH, {
+  runMigrations: true,
+  walEnabled: process.env.DB_WAL_MODE === "true",
+});
+const queueClient = queueDb.session?.client;
+if (typeof queueClient?.close !== "function") {
+  throw new Error(
+    "queue prerequisite FAILED: buildDBClient did not expose a better-sqlite3 handle",
+  );
+}
+queueClient.close();
+console.log(`queue schema verified at ${QUEUE_DB_PATH}`);
